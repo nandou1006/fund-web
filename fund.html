@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web版养基助手</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <style>
+        :root {
+            --bg-color: #f5f7fa;
+            --card-bg: #ffffff;
+            --text-main: #333;
+            --text-sub: #999;
+            --up-color: #e74c3c;
+            --down-color: #2ecc71;
+            --primary: #3498db;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--bg-color);
+            margin: 0;
+            padding: 20px;
+            color: var(--text-main);
+        }
+
+        .container { max-width: 600px; margin: 0 auto; }
+        h1 { text-align: center; font-size: 1.5rem; margin-bottom: 20px; }
+
+        .search-box {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            background: var(--card-bg);
+            padding: 15px;
+            border-radius: 12px;
+            box-shadow: 0 2px 12px rgba(0,0,0,0.05);
+        }
+
+        input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 16px;
+            outline: none;
+            letter-spacing: 1px;
+        }
+
+        button {
+            padding: 0 20px;
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+
+        .status-bar {
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-sub);
+            margin-bottom: 10px;
+        }
+
+        .fund-list { display: flex; flex-direction: column; gap: 12px; }
+
+        .fund-card {
+            background: var(--card-bg);
+            padding: 18px;
+            border-radius: 12px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.03);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: relative;
+        }
+
+        .fund-info h3 { margin: 0 0 5px 0; font-size: 15px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;}
+        .fund-code { font-size: 11px; color: var(--text-sub); background: #eee; padding: 2px 5px; border-radius: 4px;}
+        .fund-time { font-size: 11px; color: var(--text-sub); margin-top: 5px; }
+        
+        .fund-data { text-align: right; }
+        .fund-rate { font-size: 22px; font-weight: bold; display: block; }
+        .fund-val { font-size: 11px; color: var(--text-sub); }
+
+        .delete-btn {
+            position: absolute;
+            top: 5px; right: 5px;
+            background: none; color: #ddd;
+            border: none; font-size: 18px;
+            cursor: pointer;
+        }
+        .delete-btn:hover { color: #ff4d4f; }
+
+        .is-up { color: var(--up-color); }
+        .is-down { color: var(--down-color); }
+        .is-flat { color: var(--text-sub); }
+        .loading-text { text-align: center; color: var(--text-sub); margin-top: 20px; }
+    </style>
+</head>
+<body>
+
+<div id="app" class="container">
+    <h1>📈 我的自选基金</h1>
+
+    <div class="search-box">
+        <input 
+            type="text" 
+            v-model="inputCode" 
+            maxlength="6"
+            inputmode="numeric"
+            placeholder="输入6位代码（如001186）"
+            @keyup.enter="addFund"
+            @input="inputCode = inputCode.replace(/\D/g, '')"
+        >
+        <button @click="addFund" :disabled="loading">添加</button>
+    </div>
+
+    <div class="status-bar" v-if="funds.length > 0">
+        {{ isRefreshing ? '正在同步最新估值...' : '自动刷新中（每分钟）：' + lastRefreshTime }}
+    </div>
+
+    <div class="fund-list">
+        <div v-for="(fund, index) in funds" :key="fund.fundcode" class="fund-card">
+            <button class="delete-btn" @click="removeFund(index)">×</button>
+            
+            <div class="fund-info">
+                <h3>{{ fund.name }}</h3>
+                <span class="fund-code">{{ fund.fundcode }}</span>
+                <div class="fund-time">估值点: {{ fund.gztime.split(' ')[1] }}</div>
+            </div>
+
+            <div class="fund-data">
+                <span class="fund-rate" :class="getColorClass(fund.gszzl)">
+                    {{ fund.gszzl > 0 ? '+' : '' }}{{ fund.gszzl }}%
+                </span>
+                <span class="fund-val">估值: {{ fund.gsz }}</span>
+            </div>
+        </div>
+
+        <div v-if="funds.length === 0" class="loading-text">
+            自选列表为空，快去添加吧~
+        </div>
+    </div>
+</div>
+
+<script>
+    const { createApp, ref, onMounted, watch } = Vue;
+
+    createApp({
+        setup() {
+            const inputCode = ref('');
+            const funds = ref([]);
+            const loading = ref(false);
+            const isRefreshing = ref(false);
+            const lastRefreshTime = ref(new Date().toLocaleTimeString());
+
+            // --- 核心逻辑 1: 本地存储 ---
+            // 初始化从 localStorage 读取
+            const loadSavedFunds = () => {
+                const saved = localStorage.getItem('my_fund_list');
+                if (saved) {
+                    funds.value = JSON.parse(saved);
+                }
+            };
+
+            // 监听数据变化，自动保存
+            watch(funds, (newVal) => {
+                localStorage.setItem('my_fund_list', JSON.stringify(newVal));
+            }, { deep: true });
+
+            // --- 核心逻辑 2: 数据请求 (JSONP) ---
+            const fetchFundData = (code) => {
+                return new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    // 动态回调函数名，防止并发请求冲突
+                    const callbackName = `jsonp_${code}_${Date.now()}`;
+                    script.src = `https://fundgz.1234567.com.cn/js/${code}.js?rt=${Date.now()}`;
+                    
+                    window.jsonpgz = (data) => {
+                        resolve(data);
+                        document.body.removeChild(script);
+                    };
+
+                    script.onerror = () => {
+                        reject();
+                        document.body.removeChild(script);
+                    };
+                    document.body.appendChild(script);
+                });
+            };
+
+            // --- 核心逻辑 3: 定时刷新 ---
+            const refreshAll = async () => {
+                if (funds.value.length === 0) return;
+                isRefreshing.value = true;
+                
+                const updatedFunds = [];
+                for (const f of funds.value) {
+                    try {
+                        const newData = await fetchFundData(f.fundcode);
+                        updatedFunds.push(newData);
+                    } catch (e) {
+                        updatedFunds.push(f); // 刷新失败保持旧数据
+                    }
+                }
+                funds.value = updatedFunds;
+                lastRefreshTime.value = new Date().toLocaleTimeString();
+                isRefreshing.value = false;
+            };
+
+            const addFund = async () => {
+                if (inputCode.value.length !== 6) return alert('请输入6位代码');
+                if (funds.value.some(f => f.fundcode === inputCode.value)) return alert('已在列表中');
+                
+                loading.value = true;
+                try {
+                    const data = await fetchFundData(inputCode.value);
+                    funds.value.unshift(data);
+                    inputCode.value = '';
+                } catch (e) {
+                    alert('该基金暂不支持或代码错误');
+                } finally {
+                    loading.value = false;
+                }
+            };
+
+            const removeFund = (index) => {
+                if(confirm('确定删除该自选吗？')) {
+                    funds.value.splice(index, 1);
+                }
+            };
+
+            const getColorClass = (rate) => {
+                const r = parseFloat(rate);
+                return r > 0 ? 'is-up' : (r < 0 ? 'is-down' : 'is-flat');
+            };
+
+            onMounted(() => {
+                loadSavedFunds();
+                // 每 60 秒刷新一次
+                setInterval(refreshAll, 60000);
+                // 页面打开时如果已有数据，先刷一次最新的
+                if(funds.value.length > 0) refreshAll();
+            });
+
+            return {
+                inputCode, funds, loading, isRefreshing, lastRefreshTime,
+                addFund, removeFund, getColorClass
+            };
+        }
+    }).mount('#app');
+</script>
+
+</body>
+</html>
